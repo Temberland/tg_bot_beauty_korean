@@ -4,13 +4,14 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.redis import RedisStorage
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from aiogram.fsm.storage.memory import MemoryStorage
-from bot.handlers import cart, catalog, orders, start, support, admin
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from bot.handlers import admin, cart, catalog, orders, start, support
 from bot.middlewares.session import DbSessionMiddleware
 from config import settings
 from db.models import Base
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,9 +29,8 @@ async def main():
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     # FSM хранилище в Redis
-    # Не забыть поменять, после тестирования
-    # storage = RedisStorage.from_url(settings.REDIS_URL)
     storage = MemoryStorage()
+
     # Бот и диспетчер
     bot = Bot(
         token=settings.BOT_TOKEN,
@@ -47,6 +47,7 @@ async def main():
     dp.include_router(cart.router)
     dp.include_router(orders.router)
     dp.include_router(support.router)
+    dp.include_router(admin.fsm_router)  # FSM без фильтра IsAdmin
     dp.include_router(admin.router)
 
     logger.info("Бот запускается...")

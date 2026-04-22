@@ -1,9 +1,14 @@
+import json
+
 from aiogram import Router
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InputMediaPhoto
+from aiogram.types import Message, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from bot.keyboards.inline import categories_kb, products_list_kb, product_kb
+from db.models import Product
 from db.repository import CartRepo, ProductRepo
 
 router = Router()
@@ -19,14 +24,11 @@ def product_text(p) -> str:
         lines.append(f"\n{p.description}")
     if p.composition:
         lines.append(f"\n<i>Состав:</i> {p.composition[:300]}...")
-
     if p.discount_price:
         lines.append(f"\nЦена: <s>{p.price} ₽</s>  <b>{p.discount_price} ₽</b> 🔥")
     else:
         lines.append(f"\nЦена: <b>{p.price} ₽</b>")
-
-    stock_label = "✅ В наличии" if p.stock > 0 else "❌ Нет в наличии"
-    lines.append(stock_label)
+    lines.append("✅ В наличии" if p.stock > 0 else "❌ Нет в наличии")
     return "\n".join(lines)
 
 
@@ -72,14 +74,20 @@ async def show_category_page(call: CallbackQuery, session: AsyncSession):
 @router.callback_query(lambda c: c.data.startswith("product:"))
 async def show_product(call: CallbackQuery, session: AsyncSession):
     product_id = int(call.data.split(":")[1])
-    prod_repo = ProductRepo(session)
-    cart_repo = CartRepo(session)
 
-    product = await prod_repo.get_by_id(product_id)
+    # Загружаем товар сразу с brand через selectinload
+    result = await session.execute(
+        select(Product)
+        .where(Product.id == product_id)
+        .options(selectinload(Product.brand), selectinload(Product.category))
+    )
+    product = result.scalar_one_or_none()
+
     if not product:
         await call.answer("Товар не найден")
         return
 
+    cart_repo = CartRepo(session)
     cart_items = await cart_repo.get_items(call.from_user.id)
     in_cart = any(i.product_id == product_id for i in cart_items)
 
@@ -88,7 +96,6 @@ async def show_product(call: CallbackQuery, session: AsyncSession):
 
     photo_ids = []
     if product.photo_ids:
-        import json
         photo_ids = json.loads(product.photo_ids)
 
     if photo_ids:

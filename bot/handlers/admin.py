@@ -26,6 +26,9 @@ router = Router()
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
+# fsm_router — без фильтра IsAdmin, для кнопок «Пропустить» внутри FSM
+fsm_router = Router()
+
 
 # ── Главная панель ───────────────────────────
 
@@ -36,7 +39,7 @@ async def admin_panel(message: Message):
         reply_markup=admin_menu_kb(),
         parse_mode="HTML",
     )
-
+3
 
 @router.callback_query(lambda c: c.data == "admin:menu")
 async def admin_menu(call: CallbackQuery, state: FSMContext):
@@ -255,7 +258,7 @@ async def ap_description(message: Message, state: FSMContext):
     await _ask_stock(message, state)
 
 
-@router.callback_query(lambda c: c.data == "ap:skip_desc", AdminAddProduct.description)
+@fsm_router.callback_query(lambda c: c.data == "ap:skip_desc", AdminAddProduct.description)
 async def ap_skip_desc(call: CallbackQuery, state: FSMContext):
     await state.update_data(description=None)
     await _ask_stock(call.message, state)
@@ -288,7 +291,7 @@ async def ap_photo(message: Message, state: FSMContext, session: AsyncSession):
     await _save_product(message, state, session)
 
 
-@router.callback_query(lambda c: c.data == "ap:skip_photo", AdminAddProduct.photo)
+@fsm_router.callback_query(lambda c: c.data == "ap:skip_photo", AdminAddProduct.photo)
 async def ap_skip_photo(call: CallbackQuery, state: FSMContext, session: AsyncSession):
     await state.update_data(photo_ids=None)
     await _save_product(call.message, state, session)
