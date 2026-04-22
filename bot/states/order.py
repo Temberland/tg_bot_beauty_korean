@@ -16,5 +16,21 @@ class AdminAddProduct(StatesGroup):
     brand = State()
     price = State()
     description = State()
-    photo = State()
     stock = State()
+    photo = State()
+
+
+class AdminEditProduct(StatesGroup):
+    waiting_value = State()
+
+
+class AdminEditCategory(StatesGroup):
+    waiting_name = State()
+
+
+class AdminEditBrand(StatesGroup):
+    waiting_name = State()
+
+
+class AdminSetDiscount(StatesGroup):
+    waiting_price = State()
