@@ -157,3 +157,76 @@ class OrderRepo:
         await self.session.execute(
             update(Order).where(Order.id == order_id).values(status=status)
         )
+
+    async def get_all(self) -> list[Order]:
+        q = select(Order).order_by(Order.created_at.desc())
+        return (await self.session.execute(q)).scalars().all()
+
+    async def get_by_status(self, status: OrderStatus) -> list[Order]:
+        q = select(Order).where(Order.status == status).order_by(Order.created_at.desc())
+        return (await self.session.execute(q)).scalars().all()
+
+    async def get_completed(self) -> list[Order]:
+        q = select(Order).where(
+            Order.status.in_([OrderStatus.delivered, OrderStatus.cancelled])
+        ).order_by(Order.created_at.desc())
+        return (await self.session.execute(q)).scalars().all()
+
+
+class ReviewRepo:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_pending(self) -> list[Review]:
+        """Отзывы на модерации (не одобренные)."""
+        q = select(Review).where(Review.is_approved == False).order_by(Review.created_at.desc())
+        return (await self.session.execute(q)).scalars().all()
+
+    async def get_approved_by_product(self, product_id: int) -> list[Review]:
+        """Одобренные отзывы по конкретному товару."""
+        q = (
+            select(Review)
+            .where(Review.product_id == product_id, Review.is_approved == True)
+            .order_by(Review.created_at.desc())
+        )
+        return (await self.session.execute(q)).scalars().all()
+
+    async def get_all_by_product(self, product_id: int) -> list[Review]:
+        """Все отзывы по товару (для администратора)."""
+        q = (
+            select(Review)
+            .where(Review.product_id == product_id)
+            .order_by(Review.is_approved, Review.created_at.desc())
+        )
+        return (await self.session.execute(q)).scalars().all()
+
+    async def add(self, user_id: int, product_id: int, rating: int, text: str | None) -> Review:
+        review = Review(
+            user_id=user_id,
+            product_id=product_id,
+            rating=rating,
+            text=text,
+            is_approved=False,
+        )
+        self.session.add(review)
+        await self.session.flush()
+        return review
+
+    async def approve(self, review_id: int) -> None:
+        await self.session.execute(
+            update(Review).where(Review.id == review_id).values(is_approved=True)
+        )
+
+    async def delete(self, review_id: int) -> None:
+        await self.session.execute(delete(Review).where(Review.id == review_id))
+
+    async def get_products_with_pending(self) -> list:
+        """Список товаров у которых есть отзывы на модерации."""
+        q = (
+            select(Product, func.count(Review.id).label("cnt"))
+            .join(Review, Review.product_id == Product.id)
+            .where(Review.is_approved == False)
+            .group_by(Product.id)
+            .order_by(func.count(Review.id).desc())
+        )
+        return (await self.session.execute(q)).all()

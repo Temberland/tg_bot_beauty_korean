@@ -10,6 +10,11 @@ class OrderForm(StatesGroup):
     confirm = State()
 
 
+class ReviewForm(StatesGroup):
+    rating = State()
+    text = State()
+
+
 class AdminAddProduct(StatesGroup):
     name = State()
     category = State()

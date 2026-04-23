@@ -6,27 +6,28 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.filters.is_admin import IsAdmin
 from bot.keyboards.inline import (
-    admin_menu_kb, order_status_kb, admin_products_kb,
+    admin_menu_kb, admin_orders_menu_kb, admin_orders_list_kb,
+    order_status_kb, admin_products_kb,
     admin_edit_product_kb, admin_categories_kb, admin_brands_kb,
     admin_reviews_kb, admin_review_action_kb, admin_promos_kb,
+    admin_reviews_products_kb,
 )
 from bot.states.order import (
     AdminAddProduct, AdminEditProduct, AdminEditCategory,
     AdminEditBrand, AdminSetDiscount,
 )
 from db.models import Brand, Category, Order, OrderItem, OrderStatus, Product, Review
-from db.repository import OrderRepo
+from db.repository import OrderRepo, ReviewRepo
 
 router = Router()
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
 
-# fsm_router — без фильтра IsAdmin, для кнопок «Пропустить» внутри FSM
 fsm_router = Router()
 
 
@@ -39,7 +40,7 @@ async def admin_panel(message: Message):
         reply_markup=admin_menu_kb(),
         parse_mode="HTML",
     )
-3
+
 
 @router.callback_query(lambda c: c.data == "admin:menu")
 async def admin_menu(call: CallbackQuery, state: FSMContext):
@@ -68,30 +69,54 @@ def _cancel_kb():
 
 
 # ════════════════════════════════════════════
-# ЗАКАЗЫ
+# ЗАКАЗЫ — новое меню
 # ════════════════════════════════════════════
 
 @router.callback_query(lambda c: c.data == "admin:orders")
-async def admin_orders(call: CallbackQuery, session: AsyncSession):
-    q = select(Order).where(Order.status == OrderStatus.new).order_by(Order.created_at.desc())
-    orders = (await session.execute(q)).scalars().all()
+async def admin_orders_menu(call: CallbackQuery):
+    """Показываем меню выбора фильтра заказов."""
+    await call.message.edit_text(
+        "📦 <b>Заказы</b>\n\nВыберите раздел:",
+        reply_markup=admin_orders_menu_kb(),
+        parse_mode="HTML",
+    )
 
+
+@router.callback_query(lambda c: c.data == "admin:orders:new")
+async def admin_orders_new(call: CallbackQuery, session: AsyncSession):
+    orders = await OrderRepo(session).get_by_status(OrderStatus.new)
     if not orders:
-        await call.message.edit_text("✅ Новых заказов нет", reply_markup=admin_menu_kb())
+        await call.message.edit_text("✅ Новых заказов нет", reply_markup=admin_orders_menu_kb())
         return
-
-    builder = InlineKeyboardBuilder()
-    for order in orders:
-        builder.button(
-            text=f"№{order.id} | {order.full_name} | {order.total_price} ₽",
-            callback_data=f"admin:order:{order.id}",
-        )
-    builder.button(text="◀️ Назад", callback_data="admin:menu")
-    builder.adjust(1)
-
     await call.message.edit_text(
         f"🆕 <b>Новые заказы ({len(orders)}):</b>",
-        reply_markup=builder.as_markup(),
+        reply_markup=admin_orders_list_kb(orders, back_cb="admin:orders"),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(lambda c: c.data == "admin:orders:all")
+async def admin_orders_all(call: CallbackQuery, session: AsyncSession):
+    orders = await OrderRepo(session).get_all()
+    if not orders:
+        await call.message.edit_text("Заказов пока нет", reply_markup=admin_orders_menu_kb())
+        return
+    await call.message.edit_text(
+        f"📋 <b>Все заказы ({len(orders)}):</b>",
+        reply_markup=admin_orders_list_kb(orders, back_cb="admin:orders"),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(lambda c: c.data == "admin:orders:done")
+async def admin_orders_done(call: CallbackQuery, session: AsyncSession):
+    orders = await OrderRepo(session).get_completed()
+    if not orders:
+        await call.message.edit_text("Завершённых заказов нет", reply_markup=admin_orders_menu_kb())
+        return
+    await call.message.edit_text(
+        f"✅ <b>Завершённые заказы ({len(orders)}):</b>",
+        reply_markup=admin_orders_list_kb(orders, back_cb="admin:orders"),
         parse_mode="HTML",
     )
 
@@ -111,7 +136,8 @@ async def admin_order_detail(call: CallbackQuery, session: AsyncSession):
         f"📍 {order.address}\n"
         f"🚚 {order.delivery_method.value}\n"
         f"💳 {order.payment_method.value}\n"
-        f"💰 {order.total_price} ₽\n\n"
+        f"💰 {order.total_price} ₽\n"
+        f"📌 Статус: <b>{order.status.value}</b>\n\n"
         f"Изменить статус:"
     )
     await call.message.edit_text(text, reply_markup=order_status_kb(order_id), parse_mode="HTML")
@@ -119,9 +145,15 @@ async def admin_order_detail(call: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(lambda c: c.data.startswith("set_status:"))
 async def set_order_status(call: CallbackQuery, session: AsyncSession):
-    _, order_id, status_value = call.data.split(":")
-    await OrderRepo(session).update_status(int(order_id), OrderStatus(status_value))
-    order = await session.get(Order, int(order_id))
+    _, order_id_str, status_value = call.data.split(":")
+    order_id = int(order_id_str)
+
+    await OrderRepo(session).update_status(order_id, OrderStatus(status_value))
+
+    # Получаем обновлённый заказ (expire_on_commit=False, но update() не обновляет кеш — делаем refresh)
+    order = await session.get(Order, order_id)
+    await session.refresh(order)
+
     try:
         await call.bot.send_message(
             order.user_id,
@@ -130,8 +162,22 @@ async def set_order_status(call: CallbackQuery, session: AsyncSession):
         )
     except Exception:
         pass
-    await call.answer(f"Статус: {status_value}")
-    await call.message.edit_reply_markup(reply_markup=admin_menu_kb())
+
+    await call.answer(f"✅ Статус изменён: {status_value}", show_alert=True)
+
+    # Перерисовываем карточку заказа с актуальным статусом
+    text = (
+        f"📋 <b>Заказ №{order.id}</b>\n"
+        f"👤 {order.full_name}\n"
+        f"📱 {order.phone}\n"
+        f"📍 {order.address}\n"
+        f"🚚 {order.delivery_method.value}\n"
+        f"💳 {order.payment_method.value}\n"
+        f"💰 {order.total_price} ₽\n"
+        f"📌 Статус: <b>{order.status.value}</b>\n\n"
+        f"Изменить статус:"
+    )
+    await call.message.edit_text(text, reply_markup=order_status_kb(order_id), parse_mode="HTML")
 
 
 # ════════════════════════════════════════════
@@ -362,7 +408,6 @@ async def admin_edit_field(call: CallbackQuery, state: FSMContext, session: Asyn
     field = parts[1]
     product_id = int(parts[2])
 
-    # Переключатели — без ввода текста
     if field == "toggle_new":
         p = await session.get(Product, product_id)
         p.is_new = not p.is_new
@@ -444,11 +489,7 @@ async def admin_edit_save(message: Message, state: FSMContext, session: AsyncSes
 @router.callback_query(lambda c: c.data == "admin:categories")
 async def admin_categories(call: CallbackQuery, session: AsyncSession):
     cats = (await session.execute(select(Category))).scalars().all()
-    await call.message.edit_text(
-        "🗂 <b>Категории:</b>",
-        reply_markup=admin_categories_kb(cats),
-        parse_mode="HTML",
-    )
+    await call.message.edit_text("🗂 <b>Категории:</b>", reply_markup=admin_categories_kb(cats), parse_mode="HTML")
 
 
 @router.callback_query(lambda c: c.data == "admin:cat:add")
@@ -507,11 +548,7 @@ async def admin_cat_delete(call: CallbackQuery, session: AsyncSession):
 @router.callback_query(lambda c: c.data == "admin:brands")
 async def admin_brands(call: CallbackQuery, session: AsyncSession):
     brands = (await session.execute(select(Brand))).scalars().all()
-    await call.message.edit_text(
-        "🏷 <b>Бренды:</b>",
-        reply_markup=admin_brands_kb(brands),
-        parse_mode="HTML",
-    )
+    await call.message.edit_text("🏷 <b>Бренды:</b>", reply_markup=admin_brands_kb(brands), parse_mode="HTML")
 
 
 @router.callback_query(lambda c: c.data == "admin:brand:add")
@@ -563,19 +600,42 @@ async def admin_brand_delete(call: CallbackQuery, session: AsyncSession):
 
 
 # ════════════════════════════════════════════
-# МОДЕРАЦИЯ ОТЗЫВОВ
+# МОДЕРАЦИЯ ОТЗЫВОВ — по товарам
 # ════════════════════════════════════════════
 
 @router.callback_query(lambda c: c.data == "admin:reviews")
 async def admin_reviews(call: CallbackQuery, session: AsyncSession):
-    reviews = (
-        await session.execute(select(Review).where(Review.is_approved == False))
-    ).scalars().all()
-    if not reviews:
+    """Список товаров с непроверенными отзывами."""
+    repo = ReviewRepo(session)
+    rows = await repo.get_products_with_pending()
+    if not rows:
         await call.message.edit_text("✅ Нет отзывов на модерации", reply_markup=admin_menu_kb())
         return
     await call.message.edit_text(
-        f"⭐ <b>Отзывы на модерации ({len(reviews)}):</b>",
+        f"⭐ <b>Отзывы на модерации</b>\n\nВыберите товар:",
+        reply_markup=admin_reviews_products_kb(rows),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(lambda c: c.data.startswith("admin:reviews:product:"))
+async def admin_reviews_by_product(call: CallbackQuery, session: AsyncSession):
+    """Все отзывы (включая одобренные) по конкретному товару."""
+    product_id = int(call.data.split(":")[3])
+    product = await session.get(Product, product_id)
+    if not product:
+        await call.answer("Товар не найден")
+        return
+
+    repo = ReviewRepo(session)
+    reviews = await repo.get_all_by_product(product_id)
+
+    if not reviews:
+        await call.answer("Отзывов нет")
+        return
+
+    await call.message.edit_text(
+        f"⭐ <b>Отзывы: {product.name}</b>\n\nВсего: {len(reviews)}",
         reply_markup=admin_reviews_kb(reviews),
         parse_mode="HTML",
     )
@@ -588,25 +648,37 @@ async def admin_review_view(call: CallbackQuery, session: AsyncSession):
     if not r:
         await call.answer("Отзыв не найден")
         return
+
+    product = await session.get(Product, r.product_id)
+    status_label = "✅ Одобрен" if r.is_approved else "⏳ На модерации"
+
     text = (
         f"⭐ <b>Отзыв #{r.id}</b>\n"
+        f"Статус: {status_label}\n"
         f"Рейтинг: {'⭐' * r.rating}\n"
-        f"Товар ID: {r.product_id}\n"
+        f"Товар: {product.name if product else r.product_id}\n"
         f"Пользователь ID: {r.user_id}\n\n"
         f"{r.text or 'Без текста'}"
     )
-    await call.message.edit_text(text, reply_markup=admin_review_action_kb(review_id), parse_mode="HTML")
+    await call.message.edit_text(
+        text,
+        reply_markup=admin_review_action_kb(review_id, r.product_id, r.is_approved),
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(lambda c: c.data.startswith("admin:review:approve:"))
 async def admin_review_approve(call: CallbackQuery, session: AsyncSession):
     review_id = int(call.data.split(":")[3])
     r = await session.get(Review, review_id)
-    r.is_approved = True
+    product_id = r.product_id
+    await ReviewRepo(session).approve(review_id)
     await call.answer("✅ Отзыв одобрен")
-    reviews = (await session.execute(select(Review).where(Review.is_approved == False))).scalars().all()
+    # Обновляем список отзывов по товару
+    reviews = await ReviewRepo(session).get_all_by_product(product_id)
+    product = await session.get(Product, product_id)
     await call.message.edit_text(
-        f"⭐ <b>Отзывы на модерации ({len(reviews)}):</b>",
+        f"⭐ <b>Отзывы: {product.name}</b>\n\nВсего: {len(reviews)}",
         reply_markup=admin_reviews_kb(reviews),
         parse_mode="HTML",
     )
@@ -614,16 +686,27 @@ async def admin_review_approve(call: CallbackQuery, session: AsyncSession):
 
 @router.callback_query(lambda c: c.data.startswith("admin:review:delete:"))
 async def admin_review_delete(call: CallbackQuery, session: AsyncSession):
-    review_id = int(call.data.split(":")[3])
+    parts = call.data.split(":")
+    review_id = int(parts[3])
+    product_id = int(parts[4]) if len(parts) > 4 else None
+
     r = await session.get(Review, review_id)
-    await session.delete(r)
+    if not product_id:
+        product_id = r.product_id if r else None
+
+    await ReviewRepo(session).delete(review_id)
     await call.answer("🗑 Отзыв удалён")
-    reviews = (await session.execute(select(Review).where(Review.is_approved == False))).scalars().all()
-    await call.message.edit_text(
-        f"⭐ <b>Отзывы на модерации ({len(reviews)}):</b>",
-        reply_markup=admin_reviews_kb(reviews),
-        parse_mode="HTML",
-    )
+
+    if product_id:
+        reviews = await ReviewRepo(session).get_all_by_product(product_id)
+        product = await session.get(Product, product_id)
+        await call.message.edit_text(
+            f"⭐ <b>Отзывы: {product.name}</b>\n\nВсего: {len(reviews)}",
+            reply_markup=admin_reviews_kb(reviews),
+            parse_mode="HTML",
+        )
+    else:
+        await call.message.edit_text("⚙️ <b>Панель администратора</b>", reply_markup=admin_menu_kb(), parse_mode="HTML")
 
 
 # ════════════════════════════════════════════
@@ -691,7 +774,6 @@ async def admin_stats(call: CallbackQuery, session: AsyncSession):
     total_orders = (await session.execute(select(func.count(Order.id)))).scalar() or 0
     total_revenue = (await session.execute(select(func.sum(Order.total_price)))).scalar() or 0
 
-    # За последние 30 дней
     month_ago = datetime.now() - timedelta(days=30)
     month_orders = (await session.execute(
         select(func.count(Order.id)).where(Order.created_at >= month_ago)
@@ -700,7 +782,6 @@ async def admin_stats(call: CallbackQuery, session: AsyncSession):
         select(func.sum(Order.total_price)).where(Order.created_at >= month_ago)
     )).scalar() or 0
 
-    # Топ-3 товара по количеству продаж
     top_q = (
         select(Product.name, func.sum(OrderItem.quantity).label("total"))
         .join(OrderItem, OrderItem.product_id == Product.id)
@@ -709,10 +790,8 @@ async def admin_stats(call: CallbackQuery, session: AsyncSession):
         .limit(3)
     )
     top_products = (await session.execute(top_q)).all()
-
     top_text = "\n".join(f"  {i+1}. {row.name} — {row.total} шт." for i, row in enumerate(top_products)) or "  Нет данных"
 
-    # Заказы по статусам
     statuses_q = select(Order.status, func.count(Order.id)).group_by(Order.status)
     statuses = (await session.execute(statuses_q)).all()
     status_text = "\n".join(f"  {s.value}: {cnt}" for s, cnt in statuses) or "  Нет данных"

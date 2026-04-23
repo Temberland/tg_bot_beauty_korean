@@ -44,7 +44,10 @@ async def show_cart(event: Message | CallbackQuery, session: AsyncSession):
 
     kb = cart_kb(items)
     if isinstance(event, CallbackQuery):
-        await event.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        try:
+            await event.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await event.message.answer(text, reply_markup=kb, parse_mode="HTML")
     else:
         await event.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -93,6 +96,24 @@ async def checkout_start(call: CallbackQuery, state: FSMContext, session: AsyncS
         return
     await state.set_state(OrderForm.full_name)
     await call.message.answer("📝 Введите ваше <b>ФИО</b>:", parse_mode="HTML")
+
+
+@router.callback_query(lambda c: c.data.startswith("checkout_back:"))
+async def checkout_back(call: CallbackQuery, state: FSMContext):
+    step = call.data.split(":")[1]
+    if step == "address":
+        await state.set_state(OrderForm.address)
+        await call.message.answer(
+            "📍 Введите <b>адрес доставки</b>:",
+            parse_mode="HTML",
+        )
+    elif step == "delivery":
+        await state.set_state(OrderForm.delivery_method)
+        await call.message.edit_text(
+            "🚚 Выберите <b>способ доставки</b>:",
+            reply_markup=delivery_kb(),
+            parse_mode="HTML",
+        )
 
 
 @router.message(OrderForm.full_name)
@@ -157,6 +178,12 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, session: AsyncSe
     order_repo = OrderRepo(session)
 
     items = await cart_repo.get_items(call.from_user.id)
+    if not items:
+        await state.clear()
+        await call.answer("❌ Корзина пуста, заказ не создан", show_alert=True)
+        await call.message.edit_text("🛒 Корзина пуста", reply_markup=main_menu_kb())
+        return
+
     order = await order_repo.create_from_cart(
         user_id=call.from_user.id,
         cart_items=items,

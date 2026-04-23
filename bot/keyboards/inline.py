@@ -26,13 +26,22 @@ def categories_kb(categories: list[Category]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def product_kb(product: Product, in_cart: bool = False) -> InlineKeyboardMarkup:
+def product_kb(product: Product, in_cart: bool = False, review_count: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if product.stock > 0:
         label = "✅ В корзине" if in_cart else "🛒 В корзину"
         builder.button(text=label, callback_data=f"add_cart:{product.id}")
-    builder.button(text="⭐ Отзывы", callback_data=f"reviews:{product.id}")
+    rev_label = f"⭐ Отзывы ({review_count})" if review_count else "⭐ Отзывы"
+    builder.button(text=rev_label, callback_data=f"reviews:{product.id}")
     builder.button(text="◀️ Назад", callback_data=f"cat:{product.category_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def reviews_kb(product_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✍️ Оставить отзыв", callback_data=f"write_review:{product_id}")
+    builder.button(text="◀️ Назад", callback_data=f"product:{product_id}")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -74,6 +83,7 @@ def delivery_kb() -> InlineKeyboardMarkup:
     builder.button(text="🚚 Курьер", callback_data="delivery:courier")
     builder.button(text="📦 Пункт выдачи", callback_data="delivery:pickup")
     builder.button(text="📮 Почта России", callback_data="delivery:post")
+    builder.button(text="◀️ Назад", callback_data="checkout_back:address")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -82,6 +92,7 @@ def payment_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Онлайн", callback_data="payment:online")
     builder.button(text="💵 При получении", callback_data="payment:on_delivery")
+    builder.button(text="◀️ Назад", callback_data="checkout_back:delivery")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -119,6 +130,29 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     builder.button(text="⭐ Отзывы", callback_data="admin:reviews")
     builder.button(text="📊 Статистика", callback_data="admin:stats")
     builder.adjust(2)
+    return builder.as_markup()
+
+
+# ── Новое: меню заказов (Новые / Все / Завершённые) ──
+def admin_orders_menu_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🆕 Новые", callback_data="admin:orders:new")
+    builder.button(text="📋 Все", callback_data="admin:orders:all")
+    builder.button(text="✅ Завершённые", callback_data="admin:orders:done")
+    builder.button(text="◀️ Назад", callback_data="admin:menu")
+    builder.adjust(3, 1)
+    return builder.as_markup()
+
+
+def admin_orders_list_kb(orders: list[Order], back_cb: str = "admin:orders") -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for order in orders:
+        builder.button(
+            text=f"№{order.id} | {order.full_name} | {order.total_price} ₽",
+            callback_data=f"admin:order:{order.id}",
+        )
+    builder.button(text="◀️ Назад", callback_data=back_cb)
+    builder.adjust(1)
     return builder.as_markup()
 
 
@@ -178,29 +212,44 @@ def admin_brands_kb(brands: list[Brand]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def admin_reviews_kb(reviews: list[Review]) -> InlineKeyboardMarkup:
+# ── Новое: отзывы — список товаров с ожидающими отзывами ──
+def admin_reviews_products_kb(rows) -> InlineKeyboardMarkup:
+    """rows — list[(Product, count)]"""
     builder = InlineKeyboardBuilder()
-    for r in reviews:
+    for product, cnt in rows:
         builder.button(
-            text=f"⭐{r.rating} — {r.text[:20] if r.text else 'без текста'}",
-            callback_data=f"admin:review:view:{r.id}",
+            text=f"📦 {product.name} ({cnt} новых)",
+            callback_data=f"admin:reviews:product:{product.id}",
         )
     builder.button(text="◀️ Назад", callback_data="admin:menu")
     builder.adjust(1)
     return builder.as_markup()
 
 
-def admin_review_action_kb(review_id: int) -> InlineKeyboardMarkup:
+def admin_reviews_kb(reviews: list[Review]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Одобрить", callback_data=f"admin:review:approve:{review_id}")
-    builder.button(text="🗑 Удалить", callback_data=f"admin:review:delete:{review_id}")
+    for r in reviews:
+        status = "✅" if r.is_approved else "⏳"
+        builder.button(
+            text=f"{status} ⭐{r.rating} — {r.text[:20] if r.text else 'без текста'}",
+            callback_data=f"admin:review:view:{r.id}",
+        )
     builder.button(text="◀️ Назад", callback_data="admin:reviews")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def admin_review_action_kb(review_id: int, product_id: int, is_approved: bool = False) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    if not is_approved:
+        builder.button(text="✅ Одобрить", callback_data=f"admin:review:approve:{review_id}")
+    builder.button(text="🗑 Удалить", callback_data=f"admin:review:delete:{review_id}:{product_id}")
+    builder.button(text="◀️ Назад", callback_data=f"admin:reviews:product:{product_id}")
     builder.adjust(2, 1)
     return builder.as_markup()
 
 
 def admin_promos_kb(products: list[Product]) -> InlineKeyboardMarkup:
-    """Список товаров для настройки скидки."""
     builder = InlineKeyboardBuilder()
     for p in products:
         disc = f" 🔖{p.discount_price}₽" if p.discount_price else ""

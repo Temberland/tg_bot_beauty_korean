@@ -2,14 +2,16 @@ import json
 
 from aiogram import Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from bot.keyboards.inline import categories_kb, products_list_kb, product_kb
-from db.models import Product
-from db.repository import CartRepo, ProductRepo
+from bot.keyboards.inline import categories_kb, products_list_kb, product_kb, reviews_kb
+from bot.states.order import ReviewForm
+from db.models import Product, Review
+from db.repository import CartRepo, ProductRepo, ReviewRepo
 
 router = Router()
 
@@ -32,6 +34,38 @@ def product_text(p) -> str:
     return "\n".join(lines)
 
 
+async def safe_edit_message(call: CallbackQuery, text: str, reply_markup=None, parse_mode: str = "HTML"):
+    try:
+        await call.message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        return
+    except Exception:
+        pass
+
+    try:
+        await call.message.edit_caption(
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+        return
+    except Exception:
+        pass
+
+    await call.message.answer(
+        text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+    )
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+
+
 @router.message(Command("catalog"))
 @router.callback_query(lambda c: c.data == "catalog")
 async def show_catalog(event: Message | CallbackQuery, session: AsyncSession):
@@ -39,8 +73,10 @@ async def show_catalog(event: Message | CallbackQuery, session: AsyncSession):
     categories = await repo.get_categories()
     text = "🛍 <b>Каталог</b>\n\nВыберите категорию:"
     kb = categories_kb(categories)
+
     if isinstance(event, CallbackQuery):
-        await event.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await safe_edit_message(event, text, reply_markup=kb, parse_mode="HTML")
+        await event.answer()
     else:
         await event.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -50,14 +86,18 @@ async def show_category(call: CallbackQuery, session: AsyncSession):
     cat_id = int(call.data.split(":")[1])
     repo = ProductRepo(session)
     products = await repo.get_by_category(cat_id, page=0)
+
     if not products:
         await call.answer("В этой категории пока нет товаров")
         return
-    await call.message.edit_text(
+
+    await safe_edit_message(
+        call,
         f"Найдено товаров: {len(products)}",
         reply_markup=products_list_kb(products, page=0, cat_id=cat_id),
         parse_mode="HTML",
     )
+    await call.answer()
 
 
 @router.callback_query(lambda c: c.data.startswith("cat_page:"))
@@ -69,13 +109,13 @@ async def show_category_page(call: CallbackQuery, session: AsyncSession):
     await call.message.edit_reply_markup(
         reply_markup=products_list_kb(products, page=page, cat_id=cat_id)
     )
+    await call.answer()
 
 
 @router.callback_query(lambda c: c.data.startswith("product:"))
 async def show_product(call: CallbackQuery, session: AsyncSession):
     product_id = int(call.data.split(":")[1])
 
-    # Загружаем товар сразу с brand через selectinload
     result = await session.execute(
         select(Product)
         .where(Product.id == product_id)
@@ -91,23 +131,156 @@ async def show_product(call: CallbackQuery, session: AsyncSession):
     cart_items = await cart_repo.get_items(call.from_user.id)
     in_cart = any(i.product_id == product_id for i in cart_items)
 
+    review_repo = ReviewRepo(session)
+    reviews = await review_repo.get_approved_by_product(product_id)
+    review_count = len(reviews)
+    avg_rating = round(sum(r.rating for r in reviews) / review_count, 1) if reviews else None
+
     text = product_text(product)
-    kb = product_kb(product, in_cart=in_cart)
+    if avg_rating:
+        text += f"\n\n⭐ Рейтинг: {avg_rating} ({review_count} отз.)"
+
+    kb = product_kb(product, in_cart=in_cart, review_count=review_count)
 
     photo_ids = []
     if product.photo_ids:
         photo_ids = json.loads(product.photo_ids)
 
     if photo_ids:
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
         await call.message.answer_photo(
             photo=photo_ids[0],
             caption=text,
             reply_markup=kb,
             parse_mode="HTML",
         )
-        await call.message.delete()
     else:
-        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        await safe_edit_message(call, text, reply_markup=kb, parse_mode="HTML")
+
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("reviews:"))
+async def show_reviews(call: CallbackQuery, session: AsyncSession):
+    product_id = int(call.data.split(":")[1])
+    product = await session.get(Product, product_id)
+    if not product:
+        await call.answer("Товар не найден")
+        return
+
+    review_repo = ReviewRepo(session)
+    reviews = await review_repo.get_approved_by_product(product_id)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✍️ Оставить отзыв", callback_data=f"write_review:{product_id}")
+    builder.button(text="◀️ Назад", callback_data=f"product:{product_id}")
+    builder.adjust(1)
+
+    if not reviews:
+        text = f"⭐ <b>Отзывы о {product.name}</b>\n\nОтзывов пока нет. Будьте первым!"
+    else:
+        lines = [f"⭐ <b>Отзывы о {product.name}</b>\n"]
+        for r in reviews:
+            stars = "⭐" * r.rating
+            text_part = f"\n{r.text}" if r.text else ""
+            lines.append(f"{stars}{text_part}")
+            lines.append("─" * 20)
+        text = "\n".join(lines)
+
+    await safe_edit_message(call, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("write_review:"))
+async def write_review_start(call: CallbackQuery, state: FSMContext):
+    product_id = call.data.split(":")[1]
+    await state.update_data(review_product_id=int(product_id))
+    await state.set_state(ReviewForm.rating)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⭐1", callback_data=f"rate:{product_id}:1")
+    builder.button(text="⭐2", callback_data=f"rate:{product_id}:2")
+    builder.button(text="⭐3", callback_data=f"rate:{product_id}:3")
+    builder.button(text="⭐4", callback_data=f"rate:{product_id}:4")
+    builder.button(text="⭐5", callback_data=f"rate:{product_id}:5")
+    builder.button(text="◀️ Отмена", callback_data=f"reviews:{product_id}")
+    builder.adjust(5, 1)
+
+    await safe_edit_message(
+        call,
+        "✍️ <b>Оцените товар:</b>",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("rate:"))
+async def rate_product(call: CallbackQuery, state: FSMContext):
+    _, product_id_str, rating_str = call.data.split(":")
+    product_id = int(product_id_str)
+    rating = int(rating_str)
+    await state.update_data(review_product_id=product_id, review_rating=rating)
+    await state.set_state(ReviewForm.text)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="⏭ Пропустить", callback_data="review_skip_text")
+    builder.button(text="◀️ Отмена", callback_data=f"reviews:{product_id}")
+    builder.adjust(1)
+
+    text = f"{'⭐' * rating} Отлично! Напишите текст отзыва или нажмите «Пропустить»:"
+    await safe_edit_message(call, text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.message(ReviewForm.text)
+async def review_text(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    await state.clear()
+    await ReviewRepo(session).add(
+        user_id=message.from_user.id,
+        product_id=data["review_product_id"],
+        rating=data["review_rating"],
+        text=message.text.strip(),
+    )
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="◀️ Назад к товару", callback_data=f"product:{data['review_product_id']}")
+
+    await message.answer(
+        f"✅ Ваша оценка {'⭐' * data['review_rating']} и отзыв приняты!\nОн будет опубликован после проверки.",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(lambda c: c.data == "review_skip_text", ReviewForm.text)
+async def review_skip_text(call: CallbackQuery, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    await state.clear()
+
+    await ReviewRepo(session).add(
+        user_id=call.from_user.id,
+        product_id=data["review_product_id"],
+        rating=data["review_rating"],
+        text=None,
+    )
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text="◀️ Назад к товару", callback_data=f"product:{data['review_product_id']}")
+
+    text = (
+        f"✅ Ваша оценка {'⭐' * data['review_rating']} принята и будет опубликована после проверки."
+    )
+    await safe_edit_message(call, text, reply_markup=builder.as_markup())
+    await call.answer()
 
 
 @router.callback_query(lambda c: c.data.startswith("filter:"))
@@ -130,8 +303,18 @@ async def filter_products(call: CallbackQuery, session: AsyncSession):
         price = p.discount_price or p.price
         lines.append(f"• {p.name} — {price} ₽")
 
-    await call.message.edit_text(
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    builder = InlineKeyboardBuilder()
+    for p in products:
+        builder.button(text=f"{p.name}", callback_data=f"product:{p.id}")
+    builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="catalog"))
+    builder.adjust(1)
+
+    await safe_edit_message(
+        call,
         "\n".join(lines),
-        reply_markup=products_list_kb(products, page=0, cat_id=0),
+        reply_markup=builder.as_markup(),
         parse_mode="HTML",
     )
+    await call.answer()

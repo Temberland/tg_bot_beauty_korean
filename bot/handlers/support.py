@@ -36,7 +36,7 @@ def support_kb():
     builder.button(text="💳 Оплата", callback_data="faq:payment")
     builder.button(text="🔄 Возврат", callback_data="faq:returns")
     builder.button(text="✅ Оригинальность", callback_data="faq:original")
-    builder.button(text="💬 Написать оператору", url="https://t.me/your_support_username")
+    builder.button(text="💬 Написать оператору", url="https://t.me/param_p1")
     builder.button(text="◀️ В меню", callback_data="main_menu")
     builder.adjust(2, 2, 1, 1)
     return builder.as_markup()
