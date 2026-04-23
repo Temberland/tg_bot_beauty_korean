@@ -266,6 +266,7 @@ def admin_edit_product_kb(product_id: int) -> InlineKeyboardMarkup:
     builder.button(text="✨ Новинка", callback_data=f"apedit:toggle_new:{product_id}")
     builder.button(text="🔥 Хит продаж", callback_data=f"apedit:toggle_best:{product_id}")
     builder.button(text="🚫 Скрыть/показать", callback_data=f"apedit:toggle_active:{product_id}")
+    builder.button(text="🗑 Удалить товар", callback_data=f"admin:product:del:{product_id}")
     builder.button(text="◀️ Назад", callback_data="admin:edit_product")
     builder.adjust(2)
     return builder.as_markup()

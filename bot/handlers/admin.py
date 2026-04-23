@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.filters.is_admin import IsAdmin
@@ -21,12 +21,20 @@ from bot.states.order import (
     AdminAddProduct, AdminEditProduct, AdminEditCategory,
     AdminEditBrand, AdminSetDiscount,
 )
-from db.models import Brand, Category, Order, OrderItem, OrderStatus, Product, Review
+from db.models import Brand, CartItem, Category, Order, OrderItem, OrderStatus, Product, Review
 from db.repository import OrderRepo, ReviewRepo
 
 router = Router()
 router.message.filter(IsAdmin())
 router.callback_query.filter(IsAdmin())
+
+
+async def _delete_product_dependencies(session, product_id: int) -> None:
+    """Удаляет все зависимые записи товара перед его удалением."""
+    await session.execute(delete(Review).where(Review.product_id == product_id))
+    await session.execute(delete(CartItem).where(CartItem.product_id == product_id))
+    await session.execute(delete(OrderItem).where(OrderItem.product_id == product_id))
+    await session.flush()
 
 fsm_router = Router()
 
@@ -402,6 +410,49 @@ async def admin_edit_product(call: CallbackQuery, session: AsyncSession):
     await call.message.edit_text(text, reply_markup=admin_edit_product_kb(product_id), parse_mode="HTML")
 
 
+@router.callback_query(lambda c: c.data.startswith("admin:product:del:") and c.data.count(":") == 3)
+async def admin_product_delete_confirm(call: CallbackQuery, session: AsyncSession):
+    """Запросить подтверждение удаления товара."""
+    product_id = int(call.data.split(":")[3])
+    p = await session.get(Product, product_id)
+    if not p:
+        await call.answer("Товар не найден")
+        return
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🗑 Да, удалить", callback_data=f"admin:product:del:confirm:{product_id}")
+    builder.button(text="◀️ Отмена", callback_data=f"admin:edit:{product_id}")
+    builder.adjust(1)
+    await call.message.edit_text(
+        f"Удалить товар <b>{p.name}</b>?\n\n"
+        "Товар будет удалён вместе с отзывами и записями в корзинах.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("admin:product:del:confirm:"))
+async def admin_product_delete_execute(call: CallbackQuery, session: AsyncSession):
+    """Удалить товар вместе со всеми зависимостями."""
+    product_id = int(call.data.split(":")[4])
+    p = await session.get(Product, product_id)
+    if not p:
+        await call.answer("Товар не найден")
+        return
+    name = p.name
+    await _delete_product_dependencies(session, product_id)
+    await session.delete(p)
+    await session.flush()
+    products = (await session.execute(select(Product))).scalars().all()
+    await call.answer(f"Товар «{name}» удалён")
+    from bot.keyboards.inline import admin_products_kb
+    await call.message.edit_text(
+        "✏️ <b>Редактировать товар</b>\n\nВыберите товар:",
+        reply_markup=admin_products_kb(products),
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(lambda c: c.data.startswith("apedit:"))
 async def admin_edit_field(call: CallbackQuery, state: FSMContext, session: AsyncSession):
     parts = call.data.split(":")
@@ -530,15 +581,71 @@ async def admin_cat_edit(call: CallbackQuery, state: FSMContext, session: AsyncS
     )
 
 
-@router.callback_query(lambda c: c.data.startswith("admin:cat:del:"))
-async def admin_cat_delete(call: CallbackQuery, session: AsyncSession):
+@router.callback_query(lambda c: c.data.startswith("admin:cat:del:") and c.data.count(":") == 3)
+async def admin_cat_delete_confirm(call: CallbackQuery, session: AsyncSession):
+    """Показать подтверждение удаления категории."""
     cat_id = int(call.data.split(":")[3])
     cat = await session.get(Category, cat_id)
+    if not cat:
+        await call.answer("Категория не найдена")
+        return
+    product_count = (await session.execute(
+        select(func.count()).select_from(Product).where(Product.category_id == cat_id)
+    )).scalar()
+    builder = InlineKeyboardBuilder()
+    if product_count:
+        builder.button(
+            text=f"🗑 Удалить вместе с {product_count} товарами",
+            callback_data=f"admin:cat:del:confirm:{cat_id}",
+        )
+    else:
+        builder.button(
+            text="🗑 Да, удалить",
+            callback_data=f"admin:cat:del:confirm:{cat_id}",
+        )
+    builder.button(text="◀️ Отмена", callback_data="admin:categories")
+    builder.adjust(1)
+    warn = f"\n\n⚠️ В категории {product_count} товаров — они тоже будут удалены!" if product_count else ""
+    await call.message.edit_text(
+        f"Удалить категорию <b>{cat.name}</b>?{warn}",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("admin:cat:del:confirm:"))
+async def admin_cat_delete_execute(call: CallbackQuery, session: AsyncSession):
+    """Удалить категорию и все её товары."""
+    cat_id = int(call.data.split(":")[4])
+    cat = await session.get(Category, cat_id)
+    if not cat:
+        await call.answer("Категория не найдена")
+        return
     name = cat.name
+    # Удаляем все зависимости и товары категории
+    product_ids = (await session.execute(
+        select(Product.id).where(Product.category_id == cat_id)
+    )).scalars().all()
+    for pid in product_ids:
+        await _delete_product_dependencies(session, pid)
+    await session.execute(delete(Product).where(Product.category_id == cat_id))
+    await session.flush()
     await session.delete(cat)
     cats = (await session.execute(select(Category))).scalars().all()
     await call.answer(f"Категория «{name}» удалена")
-    await call.message.edit_reply_markup(reply_markup=admin_categories_kb(cats))
+    builder = InlineKeyboardBuilder()
+    for c in cats:
+        builder.button(text=f"✏️ {c.name}", callback_data=f"admin:cat:edit:{c.id}")
+        builder.button(text="🗑", callback_data=f"admin:cat:del:{c.id}")
+    builder.button(text="➕ Добавить", callback_data="admin:cat:add")
+    builder.button(text="◀️ Назад", callback_data="admin:menu")
+    builder.adjust(2)
+    await call.message.edit_text(
+        "🗂 <b>Категории</b>\n\nВыберите категорию для редактирования:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
 
 
 # ════════════════════════════════════════════
@@ -588,15 +695,71 @@ async def admin_brand_edit(call: CallbackQuery, state: FSMContext, session: Asyn
     )
 
 
-@router.callback_query(lambda c: c.data.startswith("admin:brand:del:"))
-async def admin_brand_delete(call: CallbackQuery, session: AsyncSession):
+@router.callback_query(lambda c: c.data.startswith("admin:brand:del:") and c.data.count(":") == 3)
+async def admin_brand_delete_confirm(call: CallbackQuery, session: AsyncSession):
+    """Показать подтверждение удаления бренда."""
     brand_id = int(call.data.split(":")[3])
     brand = await session.get(Brand, brand_id)
+    if not brand:
+        await call.answer("Бренд не найден")
+        return
+    product_count = (await session.execute(
+        select(func.count()).select_from(Product).where(Product.brand_id == brand_id)
+    )).scalar()
+    builder = InlineKeyboardBuilder()
+    if product_count:
+        builder.button(
+            text=f"🗑 Удалить вместе с {product_count} товарами",
+            callback_data=f"admin:brand:del:confirm:{brand_id}",
+        )
+    else:
+        builder.button(
+            text="🗑 Да, удалить",
+            callback_data=f"admin:brand:del:confirm:{brand_id}",
+        )
+    builder.button(text="◀️ Отмена", callback_data="admin:brands")
+    builder.adjust(1)
+    warn = f"\n\n⚠️ У бренда {product_count} товаров — они тоже будут удалены!" if product_count else ""
+    await call.message.edit_text(
+        f"Удалить бренд <b>{brand.name}</b>?{warn}",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("admin:brand:del:confirm:"))
+async def admin_brand_delete_execute(call: CallbackQuery, session: AsyncSession):
+    """Удалить бренд и все его товары."""
+    brand_id = int(call.data.split(":")[4])
+    brand = await session.get(Brand, brand_id)
+    if not brand:
+        await call.answer("Бренд не найден")
+        return
     name = brand.name
+    # Удаляем все зависимости и товары бренда
+    product_ids = (await session.execute(
+        select(Product.id).where(Product.brand_id == brand_id)
+    )).scalars().all()
+    for pid in product_ids:
+        await _delete_product_dependencies(session, pid)
+    await session.execute(delete(Product).where(Product.brand_id == brand_id))
+    await session.flush()
     await session.delete(brand)
     brands = (await session.execute(select(Brand))).scalars().all()
     await call.answer(f"Бренд «{name}» удалён")
-    await call.message.edit_reply_markup(reply_markup=admin_brands_kb(brands))
+    builder = InlineKeyboardBuilder()
+    for b in brands:
+        builder.button(text=f"✏️ {b.name}", callback_data=f"admin:brand:edit:{b.id}")
+        builder.button(text="🗑", callback_data=f"admin:brand:del:{b.id}")
+    builder.button(text="➕ Добавить", callback_data="admin:brand:add")
+    builder.button(text="◀️ Назад", callback_data="admin:menu")
+    builder.adjust(2)
+    await call.message.edit_text(
+        "🏷 <b>Бренды</b>\n\nВыберите бренд для редактирования:",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
 
 
 # ════════════════════════════════════════════
