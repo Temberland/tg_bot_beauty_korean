@@ -35,19 +35,23 @@ def product_text(p) -> str:
 
 
 async def safe_edit_message(call: CallbackQuery, text: str, reply_markup=None, parse_mode: str = "HTML"):
-    try:
-        await call.message.edit_text(
+    # Если текущее сообщение содержит фото/медиа — удаляем его и отправляем новое текстовое.
+    # Это решает проблему: при нажатии "Назад" с карточки товара фото исчезает корректно.
+    if call.message.photo or call.message.video or call.message.document:
+        await call.message.answer(
             text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
+        try:
+            await call.message.delete()
+        except Exception:
+            pass
         return
-    except Exception:
-        pass
 
     try:
-        await call.message.edit_caption(
-            caption=text,
+        await call.message.edit_text(
+            text,
             reply_markup=reply_markup,
             parse_mode=parse_mode,
         )
