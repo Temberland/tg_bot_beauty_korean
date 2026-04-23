@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from bot.keyboards.inline import categories_kb, products_list_kb, product_kb, reviews_kb
+from bot.keyboards.inline import (
+    categories_kb, products_list_kb, product_kb, reviews_kb, brands_filter_kb,
+)
 from bot.states.order import ReviewForm
 from db.models import Product, Review
 from db.repository import CartRepo, ProductRepo, ReviewRepo
@@ -36,7 +38,6 @@ def product_text(p) -> str:
 
 async def safe_edit_message(call: CallbackQuery, text: str, reply_markup=None, parse_mode: str = "HTML"):
     # Если текущее сообщение содержит фото/медиа — удаляем его и отправляем новое текстовое.
-    # Это решает проблему: при нажатии "Назад" с карточки товара фото исчезает корректно.
     if call.message.photo or call.message.video or call.message.document:
         await call.message.answer(
             text,
@@ -70,6 +71,14 @@ async def safe_edit_message(call: CallbackQuery, text: str, reply_markup=None, p
         pass
 
 
+def _sort_label(sort: str | None) -> str:
+    if sort == "price_asc":
+        return " · цена ↑"
+    if sort == "price_desc":
+        return " · цена ↓"
+    return ""
+
+
 @router.message(Command("catalog"))
 @router.callback_query(lambda c: c.data == "catalog")
 async def show_catalog(event: Message | CallbackQuery, session: AsyncSession):
@@ -85,6 +94,7 @@ async def show_catalog(event: Message | CallbackQuery, session: AsyncSession):
         await event.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+# ── Вход в категорию (без фильтров) ─────────────────────────
 @router.callback_query(lambda c: c.data.startswith("cat:"))
 async def show_category(call: CallbackQuery, session: AsyncSession):
     cat_id = int(call.data.split(":")[1])
@@ -104,14 +114,79 @@ async def show_category(call: CallbackQuery, session: AsyncSession):
     await call.answer()
 
 
+# ── Применить фильтр (сортировка или бренд) ─────────────────
+# callback: cat_sort:{cat_id}:{sort}:{brand_id}
+# sort: price_asc | price_desc | none
+# brand_id: 0 = без фильтра
+@router.callback_query(lambda c: c.data.startswith("cat_sort:"))
+async def apply_sort(call: CallbackQuery, session: AsyncSession):
+    _, cat_id_s, sort_s, brand_id_s = call.data.split(":")
+    cat_id = int(cat_id_s)
+    sort = sort_s if sort_s != "none" else None
+    brand_id = int(brand_id_s) if int(brand_id_s) != 0 else None
+
+    repo = ProductRepo(session)
+    products = await repo.get_by_category(cat_id, page=0, sort=sort, brand_id=brand_id)
+
+    if not products:
+        await call.answer("Товаров по этому фильтру не найдено")
+        return
+
+    label = _sort_label(sort)
+    await safe_edit_message(
+        call,
+        f"Найдено товаров: {len(products)}{label}",
+        reply_markup=products_list_kb(products, page=0, cat_id=cat_id, sort=sort, brand_id=brand_id),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+# ── Меню выбора бренда ───────────────────────────────────────
+# callback: cat_brand_menu:{cat_id}:{sort}
+@router.callback_query(lambda c: c.data.startswith("cat_brand_menu:"))
+async def show_brand_menu(call: CallbackQuery, session: AsyncSession):
+    _, cat_id_s, sort_s = call.data.split(":")
+    cat_id = int(cat_id_s)
+    sort = sort_s if sort_s != "none" else None
+
+    repo = ProductRepo(session)
+    brands = await repo.get_brands_by_category(cat_id)
+
+    if not brands:
+        await call.answer("Бренды не найдены")
+        return
+
+    await safe_edit_message(
+        call,
+        "🏷 <b>Выберите бренд:</b>",
+        reply_markup=brands_filter_kb(brands, cat_id=cat_id, sort=sort),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+# ── Пагинация с учётом фильтров ──────────────────────────────
+# callback: cat_page:{cat_id}:{page}:{sort}:{brand_id}
 @router.callback_query(lambda c: c.data.startswith("cat_page:"))
 async def show_category_page(call: CallbackQuery, session: AsyncSession):
-    _, cat_id, page = call.data.split(":")
-    cat_id, page = int(cat_id), int(page)
+    parts = call.data.split(":")
+    cat_id = int(parts[1])
+    page = int(parts[2])
+    sort_s = parts[3] if len(parts) > 3 else "none"
+    brand_id_s = parts[4] if len(parts) > 4 else "0"
+    sort = sort_s if sort_s != "none" else None
+    brand_id = int(brand_id_s) if int(brand_id_s) != 0 else None
+
     repo = ProductRepo(session)
-    products = await repo.get_by_category(cat_id, page=page)
-    await call.message.edit_reply_markup(
-        reply_markup=products_list_kb(products, page=page, cat_id=cat_id)
+    products = await repo.get_by_category(cat_id, page=page, sort=sort, brand_id=brand_id)
+
+    label = _sort_label(sort)
+    await safe_edit_message(
+        call,
+        f"Найдено товаров: {len(products)}{label}",
+        reply_markup=products_list_kb(products, page=page, cat_id=cat_id, sort=sort, brand_id=brand_id),
+        parse_mode="HTML",
     )
     await call.answer()
 

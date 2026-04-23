@@ -46,19 +46,101 @@ def reviews_kb(product_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def products_list_kb(products: list[Product], page: int, cat_id: int) -> InlineKeyboardMarkup:
+def products_list_kb(
+    products: list[Product],
+    page: int,
+    cat_id: int,
+    sort: str | None = None,
+    brand_id: int | None = None,
+) -> InlineKeyboardMarkup:
+    """
+    Список товаров с активными фильтрами.
+    sort: None | 'price_asc' | 'price_desc'
+    brand_id: None | int
+    """
     builder = InlineKeyboardBuilder()
+
+    # --- Кнопки фильтров ---
+    # Фильтр по цене
+    if sort == "price_asc":
+        price_btn = InlineKeyboardButton(
+            text="💰 Цена ↑ ✓",
+            callback_data=f"cat_sort:{cat_id}:price_desc:{brand_id or 0}",
+        )
+    elif sort == "price_desc":
+        price_btn = InlineKeyboardButton(
+            text="💰 Цена ↓ ✓",
+            callback_data=f"cat_sort:{cat_id}:price_asc:{brand_id or 0}",
+        )
+    else:
+        price_btn = InlineKeyboardButton(
+            text="💰 По цене",
+            callback_data=f"cat_sort:{cat_id}:price_asc:{brand_id or 0}",
+        )
+
+    # Фильтр по бренду
+    if brand_id:
+        brand_btn = InlineKeyboardButton(
+            text="🏷 Бренд ✓",
+            callback_data=f"cat_brand_menu:{cat_id}:{sort or 'none'}",
+        )
+    else:
+        brand_btn = InlineKeyboardButton(
+            text="🏷 По бренду",
+            callback_data=f"cat_brand_menu:{cat_id}:{sort or 'none'}",
+        )
+
+    builder.row(price_btn, brand_btn)
+
+    # --- Список товаров ---
     for p in products:
         price = p.discount_price or p.price
         builder.button(text=f"{p.name} — {price} ₽", callback_data=f"product:{p.id}")
+
+    # --- Пагинация ---
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"cat_page:{cat_id}:{page - 1}"))
+        nav.append(InlineKeyboardButton(
+            text="◀️",
+            callback_data=f"cat_page:{cat_id}:{page - 1}:{sort or 'none'}:{brand_id or 0}",
+        ))
     if len(products) == 6:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"cat_page:{cat_id}:{page + 1}"))
+        nav.append(InlineKeyboardButton(
+            text="▶️",
+            callback_data=f"cat_page:{cat_id}:{page + 1}:{sort or 'none'}:{brand_id or 0}",
+        ))
     if nav:
         builder.row(*nav)
+
     builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="catalog"))
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def brands_filter_kb(
+    brands: list[Brand],
+    cat_id: int,
+    sort: str | None,
+    active_brand_id: int | None = None,
+) -> InlineKeyboardMarkup:
+    """Список брендов для фильтрации в категории."""
+    builder = InlineKeyboardBuilder()
+    sort_str = sort or "none"
+    for brand in brands:
+        mark = " ✓" if brand.id == active_brand_id else ""
+        builder.button(
+            text=f"{brand.name}{mark}",
+            callback_data=f"cat_sort:{cat_id}:{sort_str}:{brand.id}",
+        )
+    # Кнопка "Все бренды" (сброс фильтра по бренду)
+    builder.button(
+        text="❌ Сбросить бренд",
+        callback_data=f"cat_sort:{cat_id}:{sort_str}:0",
+    )
+    builder.button(
+        text="◀️ Назад",
+        callback_data=f"cat_sort:{cat_id}:{sort_str}:{active_brand_id or 0}",
+    )
     builder.adjust(1)
     return builder.as_markup()
 
@@ -133,7 +215,6 @@ def admin_menu_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-# ── Новое: меню заказов (Новые / Все / Завершённые) ──
 def admin_orders_menu_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🆕 Новые", callback_data="admin:orders:new")
@@ -212,7 +293,6 @@ def admin_brands_kb(brands: list[Brand]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-# ── Новое: отзывы — список товаров с ожидающими отзывами ──
 def admin_reviews_products_kb(rows) -> InlineKeyboardMarkup:
     """rows — list[(Product, count)]"""
     builder = InlineKeyboardBuilder()

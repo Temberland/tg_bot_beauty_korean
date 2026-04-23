@@ -39,12 +39,33 @@ class ProductRepo:
         result = await self.session.execute(select(Brand))
         return result.scalars().all()
 
-    async def get_by_category(self, category_id: int, page: int = 0, per_page: int = 6) -> list[Product]:
+    async def get_by_category(
+        self,
+        category_id: int,
+        page: int = 0,
+        per_page: int = 6,
+        sort: str | None = None,
+        brand_id: int | None = None,
+    ) -> list[Product]:
+        q = select(Product).where(Product.category_id == category_id, Product.is_active == True)
+        if brand_id:
+            q = q.where(Product.brand_id == brand_id)
+        if sort == "price_asc":
+            q = q.order_by(Product.price.asc())
+        elif sort == "price_desc":
+            q = q.order_by(Product.price.desc())
+        q = q.offset(page * per_page).limit(per_page)
+        result = await self.session.execute(q)
+        return result.scalars().all()
+
+    async def get_brands_by_category(self, category_id: int) -> list[Brand]:
+        """Бренды, у которых есть активные товары в данной категории."""
         q = (
-            select(Product)
+            select(Brand)
+            .join(Product, Product.brand_id == Brand.id)
             .where(Product.category_id == category_id, Product.is_active == True)
-            .offset(page * per_page)
-            .limit(per_page)
+            .distinct()
+            .order_by(Brand.name)
         )
         result = await self.session.execute(q)
         return result.scalars().all()
